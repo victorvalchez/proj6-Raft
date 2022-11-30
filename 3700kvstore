@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import argparse, socket, time, json, select, struct, sys, math, os
+import argparse, socket, time, json, select, struct, sys, math, os, random
 
 BROADCAST = "FFFF"
 
@@ -9,6 +9,16 @@ class Replica:
         self.port = port
         self.id = id
         self.others = others
+
+        self.leader = BROADCAST # contains the ID of the leader (as far as this replica knows)
+                                # if no leader, contains BROADCAST
+        self.state = "follower"
+        self.timeout = random.uniform(0.15, 0.3) # election timeout to become candidate (in sec)
+        self.term = 0
+
+        self.my_votes = 0 #counter to keep track of all the votes I receive during election
+        self.majority_bounder = (len(self.others)+1)//2 + 1
+        #self.votedFor = None #candidate Id that received my vote in current term
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('localhost', 0))
@@ -21,12 +31,123 @@ class Replica:
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), ('localhost', self.port))
 
-    def run(self):
-        while True:
-            data, addr = self.socket.recvfrom(65535)
-            msg = data.decode('utf-8')
+    def send_fail(self, dst, mid):
+        #if no leader, self.leader will be "BROADCAST"
+        msg = {"src" : self.id, "dst" : dst, "leader": self.leader, "type" : "fail", "MID" : mid}
+        self.send(msg)
 
-            print("Received message '%s'" % (msg,), flush=True)
+    def send_redirect(self, dst, mid):
+        #if no leader, self.leader will be "BROADCAST"
+        msg = {"src" : self.id, "dst" : dst, "leader": self.leader, "type" : "redirect", "MID" : mid}
+        self.send(msg)
+    
+    def send_AppendEntry(self, log_entry):
+        # log_entry can be empty if it is just a heartbeat
+        # Add self.term so that replicas know the change when there's a new leader
+        msg = {"src" : self.id, "dst" : BROADCAST, "leader": self.leader, "type" : "AppendEntry", "term": self.term, "log_entry": log_entry}
+        self.send(msg)
+
+    def get_received(self, msg_dic):
+        if self.state != "leader":
+            self.send_redirect(msg_dic['src'], msg_dic["MID"])
+        else:   
+            self.send_fail(msg_dic["src"], msg_dic["MID"])
+
+    def put_received(self, msg_dic):
+        if self.state != "leader":
+            self.send_redirect(msg_dic['src'], msg_dic["MID"])
+        else:   
+            self.send_fail(msg_dic["src"], msg_dic["MID"])
+
+    def run(self):
+        start_time = time.time()
+        count = 0
+        while True:
+            count+=1
+            # to make the code single-thread we write it in an event-driven style
+            socks = select.select([self.socket], [], [], 0.01)[0] # small timeout to not block the proces
+
+            # we use count to regulate the heartbeat rate
+            if count % 5 == 0 and self.state == "leader":
+                # tell all replicas that I am the new leader with an empty AppendEntry
+                self.send_AppendEntry(None)
+                
+            if time.time() - start_time > self.timeout and self.state != "leader":
+                self.term += 1
+                self.state = "candidate"
+                self.leader = BROADCAST
+                self.my_votes = 0 # reset votes counter
+                # request vote of the other replicas
+                msg = {"src" : self.id, "dst": BROADCAST, "leader": self.leader, "type" : "RequestVote", "term" : self.term}
+                self.send(msg)
+                start_time = time.time()
+                
+
+            for conn in socks:
+                data, addr = conn.recvfrom(65535)
+                msg = data.decode('utf-8')
+
+                print("Received message '%s'" % (msg,), flush=True)
+
+                msg_dic = json.loads(msg)  # msg is now a python dictionary
+
+                if msg_dic["type"] == "get":
+                    self.get_received(msg_dic)
+
+                elif msg_dic["type"] == "put":
+                    self.put_received(msg_dic)
+
+                elif msg_dic["type"] == "RequestVote":
+                    # I just vote the first one in the corresponfing term
+                    if self.term < msg_dic["term"]:
+                        self.leader = BROADCAST
+                        self.term = msg_dic["term"]
+                        self.my_votes = 0
+                        
+                        #vote for the candidate
+                        print("vote sent to ", msg_dic["src"])
+                        msg = {"src" : self.id, "dst" : msg_dic["src"], "leader": self.leader, "type" : "vote", "term" : self.term}
+                        self.send(msg)
+
+                    start_time = time.time()
+
+
+                elif msg_dic["type"] == "vote" and self.term == msg_dic["term"]:
+                    self.my_votes += 1
+                    print("-----------------vote received, votes received: ", self.my_votes)
+                    print("self.my_votes: ", self.my_votes)
+                    print("self.majority_bounder: ", self.majority_bounder)
+                    # I add a vote because I vote for myself
+                    if self.my_votes + 1 >= self.majority_bounder:
+                        self.my_votes = 0
+                        self.state = "leader"
+                        self.leader = self.id
+                        # tell all replicas that I am the new leader with an empty AppendEntry
+                        self.send_AppendEntry(None)
+                        
+
+                    start_time = time.time()
+
+                elif msg_dic["type"] == "AppendEntry":
+                    # AppendEntries always reset timeout
+                    start_time = time.time()
+
+                    if self.term < msg_dic["term"]:
+                        # a new leader has been elected
+                        self.term = msg_dic["term"]
+                        self.leader = msg_dic["src"]
+                        self.state = "follower"
+
+                    # check if there was a log request in the message
+                    if msg_dic["log_entry"] is not None:
+                        pass
+                        #TODO
+
+                else:
+                    print("Operation not supported")
+
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='run a key-value store')
