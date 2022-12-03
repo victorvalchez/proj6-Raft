@@ -4,6 +4,13 @@ import argparse, socket, time, json, select, struct, sys, math, os, random
 
 BROADCAST = "FFFF"
 
+class LogEntry():
+    def __init__(self, term, key, value):
+        self.term = term
+        self.key = key
+        self.value = value
+
+
 class Replica:
     def __init__(self, port, id, others):
         self.port = port
@@ -22,6 +29,9 @@ class Replica:
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('localhost', 0))
+
+        self.state_machine = {}
+        self.log = []
 
         print("Replica %s starting up" % self.id, flush=True)
         hello = { "src": self.id, "dst": BROADCAST, "leader": BROADCAST, "type": "hello" }
@@ -47,17 +57,30 @@ class Replica:
         msg = {"src" : self.id, "dst" : BROADCAST, "leader": self.leader, "type" : "AppendEntry", "term": self.term, "log_entry": log_entry}
         self.send(msg)
 
+    def answer_get(self, dst, value, mid):
+        msg = {"src" : self.id, "dst" : dst, "leader": self.leader, "type" : "ok", "MID" : mid, "value" : value}
+        self.send(msg)
+
+    def answer_put(self, dst, mid):
+        msg = {"src" : self.id, "dst" : dst, "leader": self.leader, "type" : "ok", "MID" : mid}
+        self.send(msg)
+
     def get_received(self, msg_dic):
         if self.state != "leader":
             self.send_redirect(msg_dic['src'], msg_dic["MID"])
         else:   
-            self.send_fail(msg_dic["src"], msg_dic["MID"])
+            #self.send_fail(msg_dic["src"], msg_dic["MID"])
+            self.answer_get(msg_dic["src"], self.state_machine[msg_dic['key']], msg_dic["MID"])
 
     def put_received(self, msg_dic):
         if self.state != "leader":
             self.send_redirect(msg_dic['src'], msg_dic["MID"])
         else:   
-            self.send_fail(msg_dic["src"], msg_dic["MID"])
+            #self.send_fail(msg_dic["src"], msg_dic["MID"])
+            self.log.append(LogEntry(self.term, msg_dic["key"], msg_dic["value"]))
+            self.state_machine[msg_dic["key"]] = msg_dic["value"]
+
+            self.answer_put(msg_dic["src"], msg_dic["MID"])
 
     def run(self):
         start_time = time.time()
@@ -73,6 +96,7 @@ class Replica:
                 self.send_AppendEntry(None)
                 
             if time.time() - start_time > self.timeout and self.state != "leader":
+                print("*****TIMEOUT*****")
                 self.term += 1
                 self.state = "candidate"
                 self.leader = BROADCAST
@@ -99,6 +123,9 @@ class Replica:
 
                 elif msg_dic["type"] == "RequestVote":
                     # I just vote the first one in the corresponfing term
+                    # By doing this we also deny vote of candidate with a lower term number 
+                    # TODO, deny also vote if the candidate’s log is not updated
+    		        # i.e. if the last log entry has the same term, grant vote if candidate has a longer log
                     if self.term < msg_dic["term"]:
                         self.leader = BROADCAST
                         self.term = msg_dic["term"]
@@ -122,7 +149,7 @@ class Replica:
                         self.my_votes = 0
                         self.state = "leader"
                         self.leader = self.id
-                        # tell all replicas that I am the new leader with an empty AppendEntry
+                        # send heartbeats to notify other servers of the new leader (me)
                         self.send_AppendEntry(None)
                         
 
