@@ -30,6 +30,8 @@ class Replica:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('localhost', 0))
 
+        self.log_counter = [] # to check if there's quorum to do commit
+
         self.state_machine = {}
         self.log = []
 
@@ -51,10 +53,15 @@ class Replica:
         msg = {"src" : self.id, "dst" : dst, "leader": self.leader, "type" : "redirect", "MID" : mid}
         self.send(msg)
     
-    def send_AppendEntry(self, log_entry):
+    def send_AppendEntry(self, log_key = None, log_value = None, index = 0):
         # log_entry can be empty if it is just a heartbeat
         # Add self.term so that replicas know the change when there's a new leader
-        msg = {"src" : self.id, "dst" : BROADCAST, "leader": self.leader, "type" : "AppendEntry", "term": self.term, "log_entry": log_entry}
+
+        if log_key is None:
+            # send just a heartbeat
+            msg = {"src" : self.id, "dst" : BROADCAST, "leader": self.leader, "type" : "AppendEntry", "term": self.term, "key": log_key}
+        else:
+            msg = {"src" : self.id, "dst" : BROADCAST, "leader": self.leader, "type" : "AppendEntry", "term": self.term, "key": log_key, "value": log_value, "index" : index}
         self.send(msg)
 
     def answer_get(self, dst, value, mid):
@@ -78,9 +85,18 @@ class Replica:
         else:   
             #self.send_fail(msg_dic["src"], msg_dic["MID"])
             self.log.append(LogEntry(self.term, msg_dic["key"], msg_dic["value"]))
-            self.state_machine[msg_dic["key"]] = msg_dic["value"]
 
-            self.answer_put(msg_dic["src"], msg_dic["MID"])
+            self.log_counter.append({"counter": 0,
+                                     "key": msg_dic["key"],
+                                     "value": msg_dic["value"],
+                                     "client": msg_dic["src"],
+                                     "MID": msg_dic["MID"],
+                                     "sent": False}) # start the counter to check if there's quorum
+
+            #send appendEntry to followers
+            self.send_AppendEntry(msg_dic["key"], msg_dic["value"], len(self.log_counter)-1)
+
+
 
     def run(self):
         start_time = time.time()
@@ -150,7 +166,7 @@ class Replica:
                         self.state = "leader"
                         self.leader = self.id
                         # send heartbeats to notify other servers of the new leader (me)
-                        self.send_AppendEntry(None)
+                        self.send_AppendEntry()
                         
 
                     start_time = time.time()
@@ -164,11 +180,33 @@ class Replica:
                         self.term = msg_dic["term"]
                         self.leader = msg_dic["src"]
                         self.state = "follower"
+                
+                    if msg_dic["key"] is not None:
+                        # if key different than None update our log
+                        self.log.append(LogEntry(self.term, msg_dic["key"], msg_dic["value"]))
 
-                    # check if there was a log request in the message
-                    if msg_dic["log_entry"] is not None:
-                        pass
-                        #TODO
+                        msg = {"src" : self.id, "dst" : msg_dic["src"], "leader": self.leader, "type" : "logged", "term" : self.term, "index" : msg_dic["index"]}
+                        self.send(msg)
+
+                elif msg_dic["type"] == "logged":
+                    i = msg_dic["index"]
+
+                    self.log_counter[i]["counter"] += 1
+                    print("......................" , self.log_counter[i], ".........................")
+
+                    # I add also my vote
+                    if not self.log_counter[i]["sent"] and self.log_counter[i]["counter"] + 1 >= self.majority_bounder: 
+                        key = self.log_counter[i]["key"]
+                        value = self.log_counter[i]["value"]
+                        client = self.log_counter[i]["client"]
+                        mid = self.log_counter[i]["MID"]
+
+                        self.state_machine[key] = value
+                        self.answer_put(client, mid)
+
+                        self.log_counter[i]["sent"] = True
+
+                        # send the commit to the followers
 
                 else:
                     print("Operation not supported")
