@@ -10,6 +10,9 @@ class LogEntry():
         self.key = key
         self.value = value
 
+    def __str__(self):
+        return str([self.term, self.key, self.value])
+
 
 class Replica:
     def __init__(self, port, id, others):
@@ -61,7 +64,13 @@ class Replica:
             # send just a heartbeat
             msg = {"src" : self.id, "dst" : BROADCAST, "leader": self.leader, "type" : "AppendEntry", "term": self.term, "key": log_key}
         else:
-            msg = {"src" : self.id, "dst" : BROADCAST, "leader": self.leader, "type" : "AppendEntry", "term": self.term, "key": log_key, "value": log_value, "index" : index}
+            if len(self.log) < 2:
+                l = None
+            else:
+                l= self.log[-2]
+            msg = {"src" : self.id, "dst" : BROADCAST, "leader": self.leader, "type" : "AppendEntry",
+                   "term": self.term, "key": log_key, "value": log_value, "index" : len(self.log)-1, "i" : index,
+                   "pre_log": None}
         self.send(msg)
 
     def answer_get(self, dst, value, mid):
@@ -71,6 +80,11 @@ class Replica:
     def answer_put(self, dst, mid):
         msg = {"src" : self.id, "dst" : dst, "leader": self.leader, "type" : "ok", "MID" : mid}
         self.send(msg)
+
+    def send_commit(self, key, value):
+        msg = {"src" : self.id, "dst" : BROADCAST, "leader": self.leader, "type" : "commit", "term": self.term, "key": key, "value": value}
+        self.send(msg)
+
 
     def get_received(self, msg_dic):
         if self.state != "leader":
@@ -96,6 +110,22 @@ class Replica:
             #send appendEntry to followers
             self.send_AppendEntry(msg_dic["key"], msg_dic["value"], len(self.log_counter)-1)
 
+
+    def update_log(self, index, pre_log, log_list):
+
+        if pre_log is not None:
+            pre_key = pre_log.key
+            pre_value = pre_log.value
+            pre_term = pre_log.term
+
+        if pre_log is None or (self.log[-1].term == pre_term and self.log[-1].key == pre_key and self.log[-1].value == pre_value and index == len(self.log)):
+            #then our log is updated
+            self.log.extend(log_list)
+        else: 
+            # reject and ask for previous previous log entry until match
+            msg = {"src" : self.id, "dst" : BROADCAST, "leader": self.leader, "type" : "reject", "term": self.term, "index_rejected": index}
+            self.send(msg)
+            
 
 
     def run(self):
@@ -183,13 +213,16 @@ class Replica:
                 
                     if msg_dic["key"] is not None:
                         # if key different than None update our log
-                        self.log.append(LogEntry(self.term, msg_dic["key"], msg_dic["value"]))
+                        term = msg_dic["term"]
+                        key = msg_dic["key"]
+                        value = msg_dic["value"]
+                        self.update_log(msg_dic["index"], msg_dic["pre_log"], [LogEntry(term, key, value)])
 
-                        msg = {"src" : self.id, "dst" : msg_dic["src"], "leader": self.leader, "type" : "logged", "term" : self.term, "index" : msg_dic["index"]}
+                        msg = {"src" : self.id, "dst" : msg_dic["src"], "leader": self.leader, "type" : "logged", "term" : self.term, "i" : msg_dic["i"]}
                         self.send(msg)
 
                 elif msg_dic["type"] == "logged":
-                    i = msg_dic["index"]
+                    i = msg_dic["i"]
 
                     self.log_counter[i]["counter"] += 1
                     print("......................" , self.log_counter[i], ".........................")
@@ -207,11 +240,31 @@ class Replica:
                         self.log_counter[i]["sent"] = True
 
                         # send the commit to the followers
+                        self.send_commit(key, value)
+
+                elif msg_dic["type"] == "commit":
+                    self.state_machine[msg_dic["key"]] = msg_dic["value"]
+
+                elif msg_dic["type"] == "reject":
+                    # update log entry of the replica
+
+                    sub_log = self.log[msg_dic["index_rejected"]-1:]
+                    pre_sub_log = self.log[msg_dic["index_rejected"]-2]
+
+                    msg = {"src" : self.id, "dst" : msg_dic["src"], "leader": self.leader, "type" : "update_log",
+                           "term": self.term, "log_list": sub_log, "pre_sub_log": pre_sub_log, "index": msg_dic["index_rejected"]-1}
+                    self.send(msg)
+
+                elif msg_dic["type"] == "update_log":
+                    self.update_log(msg_dic["index"], msg_dic["pre_sub_log"], msg_dic["sub_log"])
+
+
 
                 else:
                     print("Operation not supported")
 
-
+            if len(self.log)> 1:
+                print("******************************************", self.log[-1])
 
 
 if __name__ == "__main__":
