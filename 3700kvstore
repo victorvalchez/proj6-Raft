@@ -4,6 +4,7 @@ import argparse, socket, time, json, select, struct, sys, math, os, random
 
 BROADCAST = "FFFF"
 
+
 class LogEntry():
     def __init__(self, term, key, value):
         self.term = term
@@ -17,26 +18,26 @@ class Replica:
         self.id = id
         self.others = others
 
-        self.leader = BROADCAST # contains the ID of the leader (as far as this replica knows)
-                                # if no leader, contains BROADCAST
+        self.leader = BROADCAST  # contains the ID of the leader (as far as this replica knows)
+        # if no leader, contains BROADCAST
         self.state = "follower"
-        self.timeout = random.uniform(0.15, 0.3) # election timeout to become candidate (in sec)
+        self.timeout = random.uniform(0.15, 0.3)  # election timeout to become candidate (in sec)
         self.term = 0
 
-        self.my_votes = 0 #counter to keep track of all the votes I receive during election
-        self.majority_bounder = (len(self.others)+1)//2 + 1
-        #self.votedFor = None #candidate Id that received my vote in current term
+        self.my_votes = 0  # counter to keep track of all the votes I receive during election
+        self.majority_bounder = (len(self.others) + 1) // 2 + 1
+        # self.votedFor = None #candidate Id that received my vote in current term
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('localhost', 0))
 
-        self.log_counter = [] # to check if there's quorum to do commit
+        self.log_counter = []  # to check if there's quorum to do commit
 
         self.state_machine = {}
         self.log = []
 
         print("Replica %s starting up" % self.id, flush=True)
-        hello = { "src": self.id, "dst": BROADCAST, "leader": BROADCAST, "type": "hello" }
+        hello = {"src": self.id, "dst": BROADCAST, "leader": BROADCAST, "type": "hello"}
         self.send(hello)
         print("Sent hello message: %s" % hello, flush=True)
 
@@ -44,46 +45,48 @@ class Replica:
         self.socket.sendto(json.dumps(message).encode('utf-8'), ('localhost', self.port))
 
     def send_fail(self, dst, mid):
-        #if no leader, self.leader will be "BROADCAST"
-        msg = {"src" : self.id, "dst" : dst, "leader": self.leader, "type" : "fail", "MID" : mid}
+        # if no leader, self.leader will be "BROADCAST"
+        msg = {"src": self.id, "dst": dst, "leader": self.leader, "type": "fail", "MID": mid}
         self.send(msg)
 
     def send_redirect(self, dst, mid):
-        #if no leader, self.leader will be "BROADCAST"
-        msg = {"src" : self.id, "dst" : dst, "leader": self.leader, "type" : "redirect", "MID" : mid}
+        # if no leader, self.leader will be "BROADCAST"
+        msg = {"src": self.id, "dst": dst, "leader": self.leader, "type": "redirect", "MID": mid}
         self.send(msg)
-    
-    def send_AppendEntry(self, log_key = None, log_value = None, index = 0):
+
+    def send_AppendEntry(self, log_key=None, log_value=None, index=0):
         # log_entry can be empty if it is just a heartbeat
         # Add self.term so that replicas know the change when there's a new leader
 
         if log_key is None:
             # send just a heartbeat
-            msg = {"src" : self.id, "dst" : BROADCAST, "leader": self.leader, "type" : "AppendEntry", "term": self.term, "key": log_key}
+            msg = {"src": self.id, "dst": BROADCAST, "leader": self.leader, "type": "AppendEntry", "term": self.term,
+                   "key": log_key}
         else:
-            msg = {"src" : self.id, "dst" : BROADCAST, "leader": self.leader, "type" : "AppendEntry", "term": self.term, "key": log_key, "value": log_value, "index" : index}
+            msg = {"src": self.id, "dst": BROADCAST, "leader": self.leader, "type": "AppendEntry", "term": self.term,
+                   "key": log_key, "value": log_value, "index": index}
         self.send(msg)
 
     def answer_get(self, dst, value, mid):
-        msg = {"src" : self.id, "dst" : dst, "leader": self.leader, "type" : "ok", "MID" : mid, "value" : value}
+        msg = {"src": self.id, "dst": dst, "leader": self.leader, "type": "ok", "MID": mid, "value": value}
         self.send(msg)
 
     def answer_put(self, dst, mid):
-        msg = {"src" : self.id, "dst" : dst, "leader": self.leader, "type" : "ok", "MID" : mid}
+        msg = {"src": self.id, "dst": dst, "leader": self.leader, "type": "ok", "MID": mid}
         self.send(msg)
 
     def get_received(self, msg_dic):
         if self.state != "leader":
             self.send_redirect(msg_dic['src'], msg_dic["MID"])
-        else:   
-            #self.send_fail(msg_dic["src"], msg_dic["MID"])
+        else:
+            # self.send_fail(msg_dic["src"], msg_dic["MID"])
             self.answer_get(msg_dic["src"], self.state_machine[msg_dic['key']], msg_dic["MID"])
 
     def put_received(self, msg_dic):
         if self.state != "leader":
             self.send_redirect(msg_dic['src'], msg_dic["MID"])
-        else:   
-            #self.send_fail(msg_dic["src"], msg_dic["MID"])
+        else:
+            # self.send_fail(msg_dic["src"], msg_dic["MID"])
             self.log.append(LogEntry(self.term, msg_dic["key"], msg_dic["value"]))
 
             self.log_counter.append({"counter": 0,
@@ -91,37 +94,35 @@ class Replica:
                                      "value": msg_dic["value"],
                                      "client": msg_dic["src"],
                                      "MID": msg_dic["MID"],
-                                     "sent": False}) # start the counter to check if there's quorum
+                                     "sent": False})  # start the counter to check if there's quorum
 
-            #send appendEntry to followers
-            self.send_AppendEntry(msg_dic["key"], msg_dic["value"], len(self.log_counter)-1)
-
-
+            # send appendEntry to followers
+            self.send_AppendEntry(msg_dic["key"], msg_dic["value"], len(self.log_counter) - 1)
 
     def run(self):
         start_time = time.time()
         count = 0
         while True:
-            count+=1
+            count += 1
             # to make the code single-thread we write it in an event-driven style
-            socks = select.select([self.socket], [], [], 0.01)[0] # small timeout to not block the proces
+            socks = select.select([self.socket], [], [], 0.01)[0]  # small timeout to not block the proces
 
             # we use count to regulate the heartbeat rate
             if count % 5 == 0 and self.state == "leader":
                 # tell all replicas that I am the new leader with an empty AppendEntry
                 self.send_AppendEntry(None)
-                
+
             if time.time() - start_time > self.timeout and self.state != "leader":
                 print("*****TIMEOUT*****")
                 self.term += 1
                 self.state = "candidate"
                 self.leader = BROADCAST
-                self.my_votes = 0 # reset votes counter
+                self.my_votes = 0  # reset votes counter
                 # request vote of the other replicas
-                msg = {"src" : self.id, "dst": BROADCAST, "leader": self.leader, "type" : "RequestVote", "term" : self.term}
+                msg = {"src": self.id, "dst": BROADCAST, "leader": self.leader, "type": "RequestVote",
+                       "term": self.term}
                 self.send(msg)
                 start_time = time.time()
-                
 
             for conn in socks:
                 data, addr = conn.recvfrom(65535)
@@ -132,6 +133,7 @@ class Replica:
                 msg_dic = json.loads(msg)  # msg is now a python dictionary
 
                 if msg_dic["type"] == "get":
+                    print(msg_dic)
                     self.get_received(msg_dic)
 
                 elif msg_dic["type"] == "put":
@@ -141,19 +143,19 @@ class Replica:
                     # I just vote the first one in the corresponfing term
                     # By doing this we also deny vote of candidate with a lower term number 
                     # TODO, deny also vote if the candidate’s log is not updated
-    		        # i.e. if the last log entry has the same term, grant vote if candidate has a longer log
+                    # i.e. if the last log entry has the same term, grant vote if candidate has a longer log
                     if self.term < msg_dic["term"]:
                         self.leader = BROADCAST
                         self.term = msg_dic["term"]
                         self.my_votes = 0
-                        
-                        #vote for the candidate
+
+                        # vote for the candidate
                         print("vote sent to ", msg_dic["src"])
-                        msg = {"src" : self.id, "dst" : msg_dic["src"], "leader": self.leader, "type" : "vote", "term" : self.term}
+                        msg = {"src": self.id, "dst": msg_dic["src"], "leader": self.leader, "type": "vote",
+                               "term": self.term}
                         self.send(msg)
 
                     start_time = time.time()
-
 
                 elif msg_dic["type"] == "vote" and self.term == msg_dic["term"]:
                     self.my_votes += 1
@@ -167,7 +169,6 @@ class Replica:
                         self.leader = self.id
                         # send heartbeats to notify other servers of the new leader (me)
                         self.send_AppendEntry()
-                        
 
                     start_time = time.time()
 
@@ -180,22 +181,23 @@ class Replica:
                         self.term = msg_dic["term"]
                         self.leader = msg_dic["src"]
                         self.state = "follower"
-                
+
                     if msg_dic["key"] is not None:
                         # if key different than None update our log
                         self.log.append(LogEntry(self.term, msg_dic["key"], msg_dic["value"]))
 
-                        msg = {"src" : self.id, "dst" : msg_dic["src"], "leader": self.leader, "type" : "logged", "term" : self.term, "index" : msg_dic["index"]}
+                        msg = {"src": self.id, "dst": msg_dic["src"], "leader": self.leader, "type": "logged",
+                               "term": self.term, "index": msg_dic["index"]}
                         self.send(msg)
 
                 elif msg_dic["type"] == "logged":
                     i = msg_dic["index"]
 
                     self.log_counter[i]["counter"] += 1
-                    print("......................" , self.log_counter[i], ".........................")
+                    print("......................", self.log_counter[i], ".........................")
 
                     # I add also my vote
-                    if not self.log_counter[i]["sent"] and self.log_counter[i]["counter"] + 1 >= self.majority_bounder: 
+                    if not self.log_counter[i]["sent"] and self.log_counter[i]["counter"] + 1 >= self.majority_bounder:
                         key = self.log_counter[i]["key"]
                         value = self.log_counter[i]["value"]
                         client = self.log_counter[i]["client"]
@@ -210,8 +212,6 @@ class Replica:
 
                 else:
                     print("Operation not supported")
-
-
 
 
 if __name__ == "__main__":
