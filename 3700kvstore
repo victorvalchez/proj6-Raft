@@ -139,6 +139,7 @@ class Replica:
             # we use count to regulate the heartbeat rate
             if count % 5 == 0 and self.state == "leader":
                 # tell all replicas that I am the new leader with an empty AppendEntry
+                # TODO DONT SEND HEARTBEAT IF OTHER MESSAGE SENT
                 self.send_AppendEntry(None)
                 
             if time.time() - start_time > self.timeout and self.state != "leader":
@@ -236,6 +237,8 @@ class Replica:
 
                         self.state_machine[key] = value
                         self.answer_put(client, mid)
+
+                        # TODO TELL REPLICAS TO DO THE COMMIT TOO
 
                         self.log_counter[i]["sent"] = True
 
