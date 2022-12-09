@@ -4,17 +4,6 @@ import argparse, socket, time, json, select, struct, sys, math, os, random
 
 BROADCAST = "FFFF"
 
-
-class LogEntry:
-    def __init__(self, term, key, value):
-        self.term = term
-        self.key = key
-        self.value = value
-
-    def __str__(self):
-        return str([self.term, self.key, self.value])
-
-
 class Replica:
     def __init__(self, port, id, others):
         self.port = port
@@ -36,6 +25,10 @@ class Replica:
 
         self.log_counter = []  # to check if there's quorum to do commit
 
+        self.heartbeat_counter = {} # counter to trigger the heartbeat
+        for id in others:
+            self.heartbeat_counter[id] = 0
+
         self.state_machine = {}
         self.log = []
 
@@ -46,6 +39,13 @@ class Replica:
 
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), ('localhost', self.port))
+
+    def reset_counts(self, dst):
+        if dst == BROADCAST:
+            for key in self.heartbeat_counter:
+                    self.heartbeat_counter[key] = 0
+        else:
+            self.heartbeat_counter[dst] = 0
 
     def send_fail(self, dst, mid):
         # if no leader, self.leader will be "BROADCAST"
@@ -58,21 +58,21 @@ class Replica:
         self.send(msg)
 
     def send_AppendEntry(self, log_key=None, log_value=None, index=0):
-        # log_entry can be empty if it is just a heartbeat
         # Add self.term so that replicas know the change when there's a new leader
-
-        if log_key is None:
-            # send just a heartbeat
-            msg = {"src": self.id, "dst": BROADCAST, "leader": self.leader, "type": "AppendEntry", "term": self.term,
-                   "key": log_key}
+        if len(self.log) < 2:
+            l = None
         else:
-            if len(self.log) < 2:
-                l = None
-            else:
-                l = self.log[-2]
-            msg = {"src": self.id, "dst": BROADCAST, "leader": self.leader, "type": "AppendEntry",
-                   "term": self.term, "key": log_key, "value": log_value, "index": len(self.log) - 1, "i": index,
-                   "pre_log": None}
+            l = self.log[-2]
+
+        msg = {"src": self.id, "dst": BROADCAST, "leader": self.leader, "type": "AppendEntry",
+                "term": self.term, "key": log_key, "value": log_value, "index": len(self.log) - 1, "i": index,
+                "pre_log": l}
+        self.send(msg)
+
+        self.reset_counts(BROADCAST)
+
+    def send_Heartbeat(self, id):
+        msg = {"src": self.id, "dst": id, "leader": self.leader, "type": "AppendEntry", "term": self.term, "key": None}
         self.send(msg)
 
     def answer_get(self, dst, value, mid):
@@ -88,6 +88,8 @@ class Replica:
                "value": value}
         self.send(msg)
 
+        self.reset_counts(BROADCAST)
+
     def get_received(self, msg_dic):
         if self.state != "leader":
             self.send_redirect(msg_dic['src'], msg_dic["MID"])
@@ -100,7 +102,9 @@ class Replica:
             self.send_redirect(msg_dic['src'], msg_dic["MID"])
         else:
             # self.send_fail(msg_dic["src"], msg_dic["MID"])
-            self.log.append(LogEntry(self.term, msg_dic["key"], msg_dic["value"]))
+            self.log.append({"term": self.term,
+                             "key": msg_dic["key"],
+                             "value": msg_dic["value"]})
 
             self.log_counter.append({"counter": 0,
                                      "key": msg_dic["key"],
@@ -115,12 +119,12 @@ class Replica:
     def update_log(self, index, pre_log, log_list):
 
         if pre_log is not None:
-            pre_key = pre_log.key
-            pre_value = pre_log.value
-            pre_term = pre_log.term
+            pre_key = pre_log["key"]
+            pre_value = pre_log["value"]
+            pre_term = pre_log["term"]
 
-        if pre_log is None or (self.log[-1].term == pre_term and self.log[-1].key == pre_key and self.log[
-            -1].value == pre_value and index == len(self.log)):
+        if pre_log is None or (self.log[-1]["term"] == pre_term and self.log[-1]["key"] == pre_key and self.log[
+            -1]["value"] == pre_value and index == len(self.log)):
             # then our log is updated
             self.log.extend(log_list)
         else:
@@ -131,17 +135,16 @@ class Replica:
 
     def run(self):
         start_time = time.time()
-        count = 0
         while True:
-            count += 1
             # to make the code single-thread we write it in an event-driven style
             socks = select.select([self.socket], [], [], 0.01)[0]  # small timeout to not block the proces
 
-            # we use count to regulate the heartbeat rate
-            if count % 5 == 0 and self.state == "leader":
-                # tell all replicas that I am the new leader with an empty AppendEntry
-                # TODO DONT SEND HEARTBEAT IF OTHER MESSAGE SENT
-                self.send_AppendEntry(None)
+            if self.state == "leader":
+                for key in self.heartbeat_counter:
+                    self.heartbeat_counter[key] += 1
+
+                    if self.heartbeat_counter[key] % 5 == 0:
+                        self.send_Heartbeat(key)
 
             if time.time() - start_time > self.timeout and self.state != "leader":
                 print("*****TIMEOUT*****")
@@ -168,7 +171,10 @@ class Replica:
 
                 elif msg_dic["type"] == "put":
                     self.put_received(msg_dic)
-
+  
+                ###################
+                # Candidate operations
+                ###################
                 elif msg_dic["type"] == "RequestVote":
                     # I just vote the first one in the corresponfing term
                     # By doing this we also deny vote of candidate with a lower term number 
@@ -198,32 +204,16 @@ class Replica:
                         self.state = "leader"
                         self.leader = self.id
                         # send heartbeats to notify other servers of the new leader (me)
-                        self.send_AppendEntry()
+                        self.send_Heartbeat(BROADCAST)
 
                     start_time = time.time()
 
-                elif msg_dic["type"] == "AppendEntry":
-                    # AppendEntries always reset timeout
-                    start_time = time.time()
-
-                    if self.term < msg_dic["term"]:
-                        # a new leader has been elected
-                        self.term = msg_dic["term"]
-                        self.leader = msg_dic["src"]
-                        self.state = "follower"
-
-                    if msg_dic["key"] is not None:
-                        # if key different than None update our log
-                        term = msg_dic["term"]
-                        key = msg_dic["key"]
-                        value = msg_dic["value"]
-                        self.update_log(msg_dic["index"], msg_dic["pre_log"], [LogEntry(term, key, value)])
-
-                        msg = {"src": self.id, "dst": msg_dic["src"], "leader": self.leader, "type": "logged",
-                               "term": self.term, "i": msg_dic["i"]}
-                        self.send(msg)
+                ###################
+                # Leader operations
+                ###################
 
                 elif msg_dic["type"] == "logged":
+                    # check id quorum for logged entries
                     i = msg_dic["i"]
 
                     self.log_counter[i]["counter"] += 1
@@ -239,19 +229,13 @@ class Replica:
                         self.state_machine[key] = value
                         self.answer_put(client, mid)
 
-                        # TODO TELL REPLICAS TO DO THE COMMIT TOO
-
                         self.log_counter[i]["sent"] = True
 
                         # send the commit to the followers
                         self.send_commit(key, value)
 
-                elif msg_dic["type"] == "commit":
-                    self.state_machine[msg_dic["key"]] = msg_dic["value"]
-
                 elif msg_dic["type"] == "reject":
-                    # update log entry of the replica
-
+                    # update log entry of the replica that rejected the log entry
                     sub_log = self.log[msg_dic["index_rejected"] - 1:]
                     pre_sub_log = self.log[msg_dic["index_rejected"] - 2]
 
@@ -260,17 +244,49 @@ class Replica:
                            "index": msg_dic["index_rejected"] - 1}
                     self.send(msg)
 
+                    self.reset_counts(msg_dic["src"])
+
+                ###################
+                # Follower operations
+                ###################
+                elif msg_dic["type"] == "AppendEntry":
+                    if self.term < msg_dic["term"]:
+                        # a new leader has been elected
+                        self.term = msg_dic["term"]
+                        self.leader = msg_dic["src"]
+                        self.state = "follower"
+
+                    if msg_dic["key"] is not None:
+                        # if key different than None update our log
+                        term = msg_dic["term"]
+                        key = msg_dic["key"]
+                        value = msg_dic["value"]
+                        self.update_log(msg_dic["index"], msg_dic["pre_log"], [{"term":term,"key": key,"value": value}])
+
+                        msg = {"src": self.id, "dst": msg_dic["src"], "leader": self.leader, "type": "logged",
+                               "term": self.term, "i": msg_dic["i"]}
+                        self.send(msg)
+
+                    # AppendEntries always reset timeout
+                    start_time = time.time()
+
+                elif msg_dic["type"] == "commit":
+                    self.state_machine[msg_dic["key"]] = msg_dic["value"]
+
+                    #reset timeout every time we receive a message from the leader
+                    start_time = time.time()
+
                 elif msg_dic["type"] == "update_log":
+                    # receive the log update from the leader
                     self.update_log(msg_dic["index"], msg_dic["pre_sub_log"], msg_dic["sub_log"])
+
+                    #reset timeout every time we receive a message from the leader
+                    start_time = time.time()
 
 
 
                 else:
                     print("Operation not supported")
-
-            if len(self.log) > 1:
-                print("******************************************", self.log[-1])
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='run a key-value store')
