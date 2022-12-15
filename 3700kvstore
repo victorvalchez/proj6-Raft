@@ -4,6 +4,7 @@ import argparse, socket, time, json, select, struct, sys, math, os, random
 
 BROADCAST = "FFFF"
 
+
 class Replica:
     def __init__(self, port, id, others):
         self.port = port
@@ -25,7 +26,7 @@ class Replica:
 
         self.log_counter = []  # to check if there's quorum to do commit
 
-        self.heartbeat_counter = {} # counter to trigger the heartbeat
+        self.heartbeat_counter = {}  # counter to trigger the heartbeat
         for id in others:
             self.heartbeat_counter[id] = 0
 
@@ -43,7 +44,7 @@ class Replica:
     def reset_counts(self, dst):
         if dst == BROADCAST:
             for key in self.heartbeat_counter:
-                    self.heartbeat_counter[key] = 0
+                self.heartbeat_counter[key] = 0
         else:
             self.heartbeat_counter[dst] = 0
 
@@ -65,8 +66,8 @@ class Replica:
             l = self.log[-2]
 
         msg = {"src": self.id, "dst": BROADCAST, "leader": self.leader, "type": "AppendEntry",
-                "term": self.term, "key": log_key, "value": log_value, "index": len(self.log) - 1, "i": index,
-                "pre_log": l}
+               "term": self.term, "key": log_key, "value": log_value, "index": len(self.log) - 1, "i": index,
+               "pre_log": l}
         self.send(msg)
 
         self.reset_counts(BROADCAST)
@@ -133,15 +134,12 @@ class Replica:
                    "index_rejected": index}
             self.send(msg)
 
-
     def candidateUpToDate(self, n_logs, last_log_term):
-
         if n_logs == 0:
             return len(self.log) == 0
         else:
             return last_log_term > self.log[-1]["term"] or \
-                (last_log_term == self.log["term"]  and n_logs >= len(self.log))
-
+                   (last_log_term == self.log[-1]["term"] and n_logs >= len(self.log))
 
     def run(self):
         start_time = time.time()
@@ -165,11 +163,11 @@ class Replica:
                 # request vote of the other replicas
                 if len(self.log) > 0:
                     msg = {"src": self.id, "dst": BROADCAST, "leader": self.leader, "type": "RequestVote",
-                        "term": self.term, "n_logs": len(self.log), "last_log_term" : self.log[-1]["term"]}
+                           "term": self.term, "n_logs": len(self.log), "last_log_term": self.log[-1]["term"]}
                 else:
                     msg = {"src": self.id, "dst": BROADCAST, "leader": self.leader, "type": "RequestVote",
-                        "term": self.term, "n_logs": 0, "last_log_term" : None}
-                
+                           "term": self.term, "n_logs": 0, "last_log_term": None}
+
                 self.send(msg)
                 start_time = time.time()
 
@@ -186,14 +184,15 @@ class Replica:
 
                 elif msg_dic["type"] == "put":
                     self.put_received(msg_dic)
-  
+
                 ###################
                 # Candidate operations
                 ###################
                 elif msg_dic["type"] == "RequestVote":
                     # I just vote the first one in the corresponding term, 
                     # However, we deny the vote if the log is not up to date
-                    if self.term < msg_dic["term"] and self.candidateUpToDate(msg_dic["n_logs"],msg_dic["last_log_term"]):
+                    if self.term < msg_dic["term"] and self.candidateUpToDate(msg_dic["n_logs"],
+                                                                              msg_dic["last_log_term"]):
                         self.leader = BROADCAST
                         self.term = msg_dic["term"]
                         self.my_votes = 0
@@ -274,7 +273,8 @@ class Replica:
                         term = msg_dic["term"]
                         key = msg_dic["key"]
                         value = msg_dic["value"]
-                        self.update_log(msg_dic["index"], msg_dic["pre_log"], [{"term":term,"key": key,"value": value}])
+                        self.update_log(msg_dic["index"], msg_dic["pre_log"],
+                                        [{"term": term, "key": key, "value": value}])
 
                         msg = {"src": self.id, "dst": msg_dic["src"], "leader": self.leader, "type": "logged",
                                "term": self.term, "i": msg_dic["i"]}
@@ -284,24 +284,25 @@ class Replica:
                     start_time = time.time()
 
                 elif msg_dic["type"] == "commit":
-                    #don't commit entries from previous leaders
+                    # don't commit entries from previous leaders
                     if msg_dic["term"] >= self.term:
                         self.state_machine[msg_dic["key"]] = msg_dic["value"]
 
-                        #reset timeout every time we receive a message from the current leader
+                        # reset timeout every time we receive a message from the current leader
                         start_time = time.time()
 
                 elif msg_dic["type"] == "update_log":
                     # receive the log update from the leader
                     self.update_log(msg_dic["index"], msg_dic["pre_sub_log"], msg_dic["sub_log"])
 
-                    #reset timeout every time we receive a message from the leader
+                    # reset timeout every time we receive a message from the leader
                     start_time = time.time()
 
 
 
                 else:
                     print("Operation not supported")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='run a key-value store')
