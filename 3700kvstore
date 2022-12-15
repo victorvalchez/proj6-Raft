@@ -293,7 +293,7 @@ class Replica:
 
                 elif msg_dic["type"] == "update_log":
                     # receive the log update from the leader
-                    self.update_log(msg_dic["index"], msg_dic["pre_sub_log"], msg_dic["sub_log"])
+                    self.update_log(msg_dic["index"], msg_dic["pre_sub_log"], msg_dic["log_list"])
 
                     # reset timeout every time we receive a message from the leader
                     start_time = time.time()
