@@ -133,6 +133,16 @@ class Replica:
                    "index_rejected": index}
             self.send(msg)
 
+
+    def candidateUpToDate(self, n_logs, last_log_term):
+
+        if n_logs == 0:
+            return len(self.log) == 0
+        else:
+            return last_log_term > self.log[-1]["term"] or \
+                (last_log_term == self.log["term"]  and n_logs >= len(self.log))
+
+
     def run(self):
         start_time = time.time()
         while True:
@@ -153,8 +163,13 @@ class Replica:
                 self.leader = BROADCAST
                 self.my_votes = 0  # reset votes counter
                 # request vote of the other replicas
-                msg = {"src": self.id, "dst": BROADCAST, "leader": self.leader, "type": "RequestVote",
-                       "term": self.term}
+                if len(self.log) > 0:
+                    msg = {"src": self.id, "dst": BROADCAST, "leader": self.leader, "type": "RequestVote",
+                        "term": self.term, "n_logs": len(self.log), "last_log_term" : self.log[-1]["term"]}
+                else:
+                    msg = {"src": self.id, "dst": BROADCAST, "leader": self.leader, "type": "RequestVote",
+                        "term": self.term, "n_logs": 0, "last_log_term" : None}
+                
                 self.send(msg)
                 start_time = time.time()
 
@@ -176,16 +191,14 @@ class Replica:
                 # Candidate operations
                 ###################
                 elif msg_dic["type"] == "RequestVote":
-                    # I just vote the first one in the corresponfing term
-                    # By doing this we also deny vote of candidate with a lower term number 
-                    # TODO, deny also vote if the candidate’s log is not updated
-                    # i.e. if the last log entry has the same term, grant vote if candidate has a longer log
-                    if self.term < msg_dic["term"]:
+                    # I just vote the first one in the corresponding term, 
+                    # However, we deny the vote if the log is not up to date
+                    if self.term < msg_dic["term"] and self.candidateUpToDate(msg_dic["n_logs"],msg_dic["last_log_term"]):
                         self.leader = BROADCAST
                         self.term = msg_dic["term"]
                         self.my_votes = 0
 
-                        # vote for the candidate
+                        # vote for the candidate if its log is up to date
                         print("vote sent to ", msg_dic["src"])
                         msg = {"src": self.id, "dst": msg_dic["src"], "leader": self.leader, "type": "vote",
                                "term": self.term}
@@ -271,10 +284,12 @@ class Replica:
                     start_time = time.time()
 
                 elif msg_dic["type"] == "commit":
-                    self.state_machine[msg_dic["key"]] = msg_dic["value"]
+                    #don't commit entries from previous leaders
+                    if msg_dic["term"] >= self.term:
+                        self.state_machine[msg_dic["key"]] = msg_dic["value"]
 
-                    #reset timeout every time we receive a message from the leader
-                    start_time = time.time()
+                        #reset timeout every time we receive a message from the current leader
+                        start_time = time.time()
 
                 elif msg_dic["type"] == "update_log":
                     # receive the log update from the leader
