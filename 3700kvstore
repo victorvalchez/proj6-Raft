@@ -231,7 +231,7 @@ class Replica:
                         if self.commitIndex < len(self.log):
                             # possibly TODO
                             pending_commits = self.log[self.commitIndex:]
-                            self.send_AppendEntry(pending_commits, self.commitIndex)
+                            #self.send_AppendEntry(pending_commits, self.commitIndex)
 
 
                     start_time = time.time()
@@ -246,9 +246,6 @@ class Replica:
                     for i in range(msg_dic["init_index"], msg_dic["end_index"]+1):
 
                         self.log_counter[i]["counter"] += 1
-                        print("......................", self.log_counter, ".........................")
-                        print(self.state)
-                        print("......................", self.log, ".........................")
                         
 
                         # I add also my vote
@@ -311,8 +308,6 @@ class Replica:
 
                     # reset timeout every time we receive a message from the leader
                     start_time = time.time()
-
-
 
                 else:
                     print("Operation not supported")
