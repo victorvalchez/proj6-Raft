@@ -15,7 +15,7 @@ class Replica:
         # if no leader, contains BROADCAST
         self.state = "follower"
         self.timeout = random.uniform(0.15, 0.3)  # election timeout to become candidate (in sec)
-        self.append_timeout = 0.25
+        self.append_timeout = 0.5
         
         self.term = 0
         self.commitIndex = 0
@@ -169,13 +169,12 @@ class Replica:
                     if time.time() - self.log_counter[i]["time"] > self.append_timeout:
                         self.log_counter[i]["time"] = time.time()
 
-                        if not self.log_counter[i]["commit"]:
-                            # if the entry is still not commited, send AppendEntries again
-                            for follower in self.log_counter[i]["followers_log_left"]:
-                                self.send_AppendEntry(follower, [self.log[i]], i)
-                        else:
+                        # if the entry is still not commited, send AppendEntries again
+                        for follower in self.log_counter[i]["followers_log_left"]:
+                            self.send_AppendEntry(follower, [self.log[i]], i)
+
+                        if self.log_counter[i]["commit"] and len(self.log_counter[i]["followers_log_left"]) == 0:
                             # if the entry is commited, send commits to the remaining followers
-                            # there's no need to check followers_log_left, the commit will update their logs
                             for follower in self.log_counter[i]["followers_commit_left"]:
                                 self.send_commit(follower, [{"log": self.log[i], "index":i}])
 
@@ -351,22 +350,10 @@ class Replica:
                             log_entry = entry["log"]
                             index = entry["index"]
 
-                            # update log (in case it was still pending)
-                            success = False
-                            if len(self.log) > index:
-                                self.log[index] = log_entry
-                                success = True
-                            if len(self.log) == index:
-                                self.log.append(log_entry)
-                                success = True
-                            else:
-                                # do nothing, I'm not ready for this commit
-                                pass
-                            if success:
-                                indices_commited.append(index)
+                            indices_commited.append(index)
 
-                                self.state_machine[log_entry["key"]] = log_entry["value"]
-                                self.commitIndex += 1
+                            self.state_machine[log_entry["key"]] = log_entry["value"]
+                            self.commitIndex += 1
 
                     
 
