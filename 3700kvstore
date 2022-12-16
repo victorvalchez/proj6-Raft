@@ -56,8 +56,11 @@ class Replica:
 
     def send_redirect(self, dst, mid):
         # if no leader, self.leader will be "BROADCAST"
-        msg = {"src": self.id, "dst": dst, "leader": self.leader, "type": "redirect", "MID": mid}
-        self.send(msg)
+        if self.leader == BROADCAST:
+            self.send_fail(dst, mid)
+        else:
+            msg = {"src": self.id, "dst": dst, "leader": self.leader, "type": "redirect", "MID": mid}
+            self.send(msg)
 
     def send_AppendEntry(self, dst, values, index):
         #values is a list of all the entries to log
@@ -98,14 +101,12 @@ class Replica:
         if self.state != "leader":
             self.send_redirect(msg_dic['src'], msg_dic["MID"])
         else:
-            # self.send_fail(msg_dic["src"], msg_dic["MID"])
             self.answer_get(msg_dic["src"], self.state_machine[msg_dic['key']], msg_dic["MID"])
 
     def put_received(self, msg_dic):
         if self.state != "leader":
             self.send_redirect(msg_dic['src'], msg_dic["MID"])
         else:
-            # self.send_fail(msg_dic["src"], msg_dic["MID"])
             self.log.append({"term": self.term,
                              "key": msg_dic["key"],
                              "value": msg_dic["value"],
