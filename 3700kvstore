@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import argparse, socket, time, json, select, struct, sys, math, os, random
+import argparse, socket, time, json, select, random
 
 BROADCAST = "FFFF"
 
@@ -15,8 +15,12 @@ class Replica:
         # if no leader, contains BROADCAST
         self.state = "follower"
         self.timeout = random.uniform(0.15, 0.3)  # election timeout to become candidate (in sec)
+        self.append_timeout = 0.15
+        
         self.term = 0
         self.commitIndex = 0
+
+        self.pending_indices = []
 
         self.my_votes = 0  # counter to keep track of all the votes I receive during election
         self.majority_bounder = (len(self.others) + 1) // 2 + 1
@@ -90,9 +94,9 @@ class Replica:
         msg = {"src": self.id, "dst": dst, "leader": self.leader, "type": "ok", "MID": mid}
         self.send(msg)
 
-    def send_commit(self, key, value):
-        msg = {"src": self.id, "dst": BROADCAST, "leader": self.leader, "type": "commit", "term": self.term, "key": key,
-               "value": value}
+    def send_commit(self, values):
+        msg = {"src": self.id, "dst": BROADCAST, "leader": self.leader, "type": "commit", "term": self.term,
+               "values": values}
         self.send(msg)
 
         self.reset_counts(BROADCAST)
@@ -153,18 +157,33 @@ class Replica:
             socks = select.select([self.socket], [], [], 0.01)[0]  # small timeout to not block the proces
 
             if self.state == "leader":
+                # send heartbeats to my followers
                 for key in self.heartbeat_counter:
                     self.heartbeat_counter[key] += 1
 
                     if self.heartbeat_counter[key] % 5 == 0:
                         self.send_Heartbeat(key)
 
+                # resend pending entries (if any)
+                for i in self.pending_indices:
+                    if time.time() - self.log_counter[i]["time"] > self.append_timeout:
+                        self.log_counter[i]["time"] = time.time()
+
+                        for follower in self.log_counter[i]["followers_left"]:
+                            self.send_AppendEntry(follower, [self.log[i]], i)
+
+
+
             if time.time() - start_time > self.timeout and self.state != "leader":
-                print("*****TIMEOUT*****")
                 self.term += 1
                 self.state = "candidate"
                 self.leader = BROADCAST
                 self.my_votes = 0  # reset votes counter
+
+                # choose another random value to reduce the likelihood of multiple split votes
+                self.timeout = random.uniform(0.15, 0.3)
+
+
                 # request vote of the other replicas
                 if len(self.log) > 0:
                     msg = {"src": self.id, "dst": BROADCAST, "leader": self.leader, "type": "RequestVote",
@@ -202,6 +221,9 @@ class Replica:
                         self.term = msg_dic["term"]
                         self.my_votes = 0
 
+                        # choose another random value to reduce the likelihood of multiple split votes
+                        self.timeout = random.uniform(0.15, 0.3)
+
                         # vote for the candidate if its log is up to date
                         print("vote sent to ", msg_dic["src"])
                         msg = {"src": self.id, "dst": msg_dic["src"], "leader": self.leader, "type": "vote",
@@ -212,9 +234,7 @@ class Replica:
 
                 elif msg_dic["type"] == "vote" and self.term == msg_dic["term"]:
                     self.my_votes += 1
-                    print("-----------------vote received, votes received: ", self.my_votes)
-                    print("self.my_votes: ", self.my_votes)
-                    print("self.majority_bounder: ", self.majority_bounder)
+
                     # I add a vote because I vote for myself
                     if self.my_votes + 1 >= self.majority_bounder:
                         self.my_votes = 0
@@ -226,7 +246,6 @@ class Replica:
                         # commit uncommitted entries
                         if self.commitIndex < len(self.log):
                             pending_commits = self.log[self.commitIndex:]
-
                             self.send_AppendEntry(BROADCAST, pending_commits, self.commitIndex)
 
 
@@ -239,29 +258,42 @@ class Replica:
                 elif msg_dic["type"] == "logged":
                     # check id quorum for logged entries
                     # i is the index in the log_counter, to check quorum
+                    commits_to_send = []
                     for i in range(msg_dic["init_index"], msg_dic["end_index"]+1):
 
                         # if its the first logged receive, start the counter to check if there's a quorum
                         if i not in self.log_counter:
-                            self.log_counter[i] = {"counter": 0, "sent": False} 
-                        
-                        self.log_counter[i]["counter"] += 1
+                            self.pending_indices.append(i)
+                            followers_left = self.others[:]
+                            self.log_counter[i] = {"counter": 0,
+                                                   "sent": False,
+                                                   "time" : time.time(),
+                                                   "followers_left": followers_left} 
 
-                        # I add also my vote
-                        if not self.log_counter[i]["sent"] and self.log_counter[i]["counter"] + 1 >= self.majority_bounder:
-                            key = self.log[i]["key"]
-                            value = self.log[i]["value"]
-                            client = self.log[i]["client"]
-                            mid = self.log[i]["MID"]
+                        if msg_dic["src"] in self.log_counter[i]["followers_left"]:
+                            self.log_counter[i]["followers_left"].remove(msg_dic["src"])
+                            self.log_counter[i]["counter"] += 1
 
-                            self.state_machine[key] = value
-                            self.commitIndex += 1
-                            self.answer_put(client, mid)
+                            # Check quorum, I add also my vote
+                            if not self.log_counter[i]["sent"] and self.log_counter[i]["counter"] + 1 >= self.majority_bounder:
+                                self.pending_indices.remove(i)
+                                
+                                key = self.log[i]["key"]
+                                value = self.log[i]["value"]
+                                client = self.log[i]["client"]
+                                mid = self.log[i]["MID"]
 
-                            self.log_counter[i]["sent"] = True
+                                self.state_machine[key] = value
+                                self.commitIndex += 1
+                                self.answer_put(client, mid)
 
-                            # send the commit to the followers
-                            self.send_commit(key, value)
+                                self.log_counter[i]["sent"] = True
+
+                                commits_to_send.append(self.log[i])
+
+                    if len(commits_to_send) > 0:
+                        # send the commit to the followers
+                        self.send_commit(commits_to_send)
 
                 elif msg_dic["type"] == "reject":
                     # update log entry of the replica that rejected the log entry
@@ -295,8 +327,9 @@ class Replica:
                 elif msg_dic["type"] == "commit":
                     # don't commit entries from previous leaders
                     if msg_dic["term"] >= self.term:
-                        self.state_machine[msg_dic["key"]] = msg_dic["value"]
-                        self.commitIndex += 1
+                        for log_entry in msg_dic["values"]:
+                            self.state_machine[log_entry["key"]] = log_entry["value"]
+                            self.commitIndex += 1
 
                         # reset timeout every time we receive a message from the current leader
                         start_time = time.time()
