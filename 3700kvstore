@@ -59,7 +59,7 @@ class Replica:
         msg = {"src": self.id, "dst": dst, "leader": self.leader, "type": "redirect", "MID": mid}
         self.send(msg)
 
-    def send_AppendEntry(self, values, index):
+    def send_AppendEntry(self, dst, values, index):
         #values is a list of all the entries to log
         # Add self.term so that replicas know the change when there's a new leader
         if index <= 1:
@@ -69,11 +69,11 @@ class Replica:
 
         # values contains list of the remaining log entries to commit
         # index contains the position of the first entry to commit in the log list
-        msg = {"src": self.id, "dst": BROADCAST, "leader": self.leader, "type": "AppendEntry",
+        msg = {"src": self.id, "dst": dst, "leader": self.leader, "type": "AppendEntry",
                "term": self.term, "values": values, "index": index, "pre_log": pre_log}
         self.send(msg)
 
-        self.reset_counts(BROADCAST)
+        self.reset_counts(dst)
 
     def send_Heartbeat(self, id):
         msg = {"src": self.id, "dst": id, "leader": self.leader, "type": "AppendEntry", "term": self.term, "values": None}
@@ -108,17 +108,12 @@ class Replica:
             # self.send_fail(msg_dic["src"], msg_dic["MID"])
             self.log.append({"term": self.term,
                              "key": msg_dic["key"],
-                             "value": msg_dic["value"]})
-
-            index_appended_entry = len(self.log)-1
-
-            self.log_counter[index_appended_entry] = {"counter": 0,
-                                                        "client": msg_dic["src"],
-                                                        "MID": msg_dic["MID"],
-                                                        "sent": False}  # start the counter to check if there's quorum
+                             "value": msg_dic["value"],
+                             "client": msg_dic["src"],
+                             "MID": msg_dic["MID"]}) 
 
             # send appendEntry to followers
-            self.send_AppendEntry([self.log[-1]], index_appended_entry)
+            self.send_AppendEntry(BROADCAST, [self.log[-1]], len(self.log)-1)
 
     def update_log(self, index, pre_log, values):
 
@@ -229,9 +224,9 @@ class Replica:
 
                         # commit uncommitted entries
                         if self.commitIndex < len(self.log):
-                            # possibly TODO
                             pending_commits = self.log[self.commitIndex:]
-                            #self.send_AppendEntry(pending_commits, self.commitIndex)
+
+                            self.send_AppendEntry(BROADCAST, pending_commits, self.commitIndex)
 
 
                     start_time = time.time()
@@ -245,15 +240,18 @@ class Replica:
                     # i is the index in the log_counter, to check quorum
                     for i in range(msg_dic["init_index"], msg_dic["end_index"]+1):
 
-                        self.log_counter[i]["counter"] += 1
+                        # if its the first logged receive, start the counter to check if there's a quorum
+                        if i not in self.log_counter:
+                            self.log_counter[i] = {"counter": 0, "sent": False} 
                         
+                        self.log_counter[i]["counter"] += 1
 
                         # I add also my vote
                         if not self.log_counter[i]["sent"] and self.log_counter[i]["counter"] + 1 >= self.majority_bounder:
                             key = self.log[i]["key"]
                             value = self.log[i]["value"]
-                            client = self.log_counter[i]["client"]
-                            mid = self.log_counter[i]["MID"]
+                            client = self.log[i]["client"]
+                            mid = self.log[i]["MID"]
 
                             self.state_machine[key] = value
                             self.commitIndex += 1
@@ -268,7 +266,7 @@ class Replica:
                     # update log entry of the replica that rejected the log entry
                     values = self.log[msg_dic["index_rejected"] - 1:]
 
-                    self.send_AppendEntry(values, msg_dic["index_rejected"] - 1)
+                    self.send_AppendEntry(msg_dic["src"], values, msg_dic["index_rejected"] - 1)
                     
                     # to avoid sending an unnecessary heartbeat
                     self.reset_counts(msg_dic["src"])
