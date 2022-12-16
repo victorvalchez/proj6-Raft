@@ -15,7 +15,7 @@ class Replica:
         # if no leader, contains BROADCAST
         self.state = "follower"
         self.timeout = random.uniform(0.15, 0.3)  # election timeout to become candidate (in sec)
-        self.append_timeout = 0.15
+        self.append_timeout = 0.25
         
         self.term = 0
         self.commitIndex = 0
@@ -94,12 +94,12 @@ class Replica:
         msg = {"src": self.id, "dst": dst, "leader": self.leader, "type": "ok", "MID": mid}
         self.send(msg)
 
-    def send_commit(self, values):
-        msg = {"src": self.id, "dst": BROADCAST, "leader": self.leader, "type": "commit", "term": self.term,
-               "values": values}
+    def send_commit(self, dst, valuesAndIndices):
+        msg = {"src": self.id, "dst": dst, "leader": self.leader, "type": "commit", "term": self.term,
+               "valuesAndindices": valuesAndIndices}
         self.send(msg)
 
-        self.reset_counts(BROADCAST)
+        self.reset_counts(dst)
 
     def get_received(self, msg_dic):
         if self.state != "leader":
@@ -169,8 +169,15 @@ class Replica:
                     if time.time() - self.log_counter[i]["time"] > self.append_timeout:
                         self.log_counter[i]["time"] = time.time()
 
-                        for follower in self.log_counter[i]["followers_left"]:
-                            self.send_AppendEntry(follower, [self.log[i]], i)
+                        if not self.log_counter[i]["commit"]:
+                            # if the entry is still not commited, send AppendEntries again
+                            for follower in self.log_counter[i]["followers_log_left"]:
+                                self.send_AppendEntry(follower, [self.log[i]], i)
+                        else:
+                            # if the entry is commited, send commits to the remaining followers
+                            # there's no need to check followers_log_left, the commit will update their logs
+                            for follower in self.log_counter[i]["followers_commit_left"]:
+                                self.send_commit(follower, [{"log": self.log[i], "index":i}])
 
 
 
@@ -264,19 +271,22 @@ class Replica:
                         # if its the first logged receive, start the counter to check if there's a quorum
                         if i not in self.log_counter:
                             self.pending_indices.append(i)
-                            followers_left = self.others[:]
+                            followers_log_left = self.others[:]
+                            followers_commit_left = self.others[:]
                             self.log_counter[i] = {"counter": 0,
                                                    "sent": False,
                                                    "time" : time.time(),
-                                                   "followers_left": followers_left} 
+                                                   "followers_log_left": followers_log_left,
+                                                   "followers_commit_left": followers_commit_left,
+                                                   "commit": False} 
 
-                        if msg_dic["src"] in self.log_counter[i]["followers_left"]:
-                            self.log_counter[i]["followers_left"].remove(msg_dic["src"])
+                        if msg_dic["src"] in self.log_counter[i]["followers_log_left"]:
+                            self.log_counter[i]["followers_log_left"].remove(msg_dic["src"])
                             self.log_counter[i]["counter"] += 1
 
                             # Check quorum, I add also my vote
                             if not self.log_counter[i]["sent"] and self.log_counter[i]["counter"] + 1 >= self.majority_bounder:
-                                self.pending_indices.remove(i)
+                                self.log_counter[i]["commit"] = True
                                 
                                 key = self.log[i]["key"]
                                 value = self.log[i]["value"]
@@ -289,12 +299,20 @@ class Replica:
 
                                 self.log_counter[i]["sent"] = True
 
-                                commits_to_send.append(self.log[i])
+                                commits_to_send.append({"log":self.log[i], "index": i})
 
                     if len(commits_to_send) > 0:
                         # send the commit to the followers
-                        self.send_commit(commits_to_send)
+                        self.send_commit(BROADCAST, commits_to_send)
 
+                elif msg_dic["type"] == "commit_done": 
+                    for i in msg_dic["indices_commited"]:
+                        if msg_dic["src"] in self.log_counter[i]["followers_commit_left"]:
+                            self.log_counter[i]["followers_commit_left"].remove(msg_dic["src"])
+
+                            if len(self.log_counter[i]["followers_commit_left"]) == 0:
+                                self.pending_indices.remove(i)
+                
                 elif msg_dic["type"] == "reject":
                     # update log entry of the replica that rejected the log entry
                     values = self.log[msg_dic["index_rejected"] - 1:]
@@ -326,10 +344,36 @@ class Replica:
 
                 elif msg_dic["type"] == "commit":
                     # don't commit entries from previous leaders
+                    indices_commited = []
                     if msg_dic["term"] >= self.term:
-                        for log_entry in msg_dic["values"]:
-                            self.state_machine[log_entry["key"]] = log_entry["value"]
-                            self.commitIndex += 1
+
+                        for entry in msg_dic["valuesAndindices"]:
+                            log_entry = entry["log"]
+                            index = entry["index"]
+
+                            # update log (in case it was still pending)
+                            success = False
+                            if len(self.log) > index:
+                                self.log[index] = log_entry
+                                success = True
+                            if len(self.log) == index:
+                                self.log.append(log_entry)
+                                success = True
+                            else:
+                                # do nothing, I'm not ready for this commit
+                                pass
+                            if success:
+                                indices_commited.append(index)
+
+                                self.state_machine[log_entry["key"]] = log_entry["value"]
+                                self.commitIndex += 1
+
+                    
+
+                        # notify leader that change is commited
+                        msg = {"src": self.id, "dst": self.leader, "leader": self.leader, "type": "commit_done",
+                           "term": self.term, "indices_commited": indices_commited}
+                        self.send(msg)
 
                         # reset timeout every time we receive a message from the current leader
                         start_time = time.time()
